@@ -48,7 +48,7 @@ jobs:
           project.write_text(text)
 
           source = Path('Classes/WDCanvasController.m')
-          text = source.read_text().replace('#import <Twitter/Twitter.h>\n', '')
+          text = source.read_text().replace('#import <Twitter/Twitter.h>\n', '#import <Social/Social.h>\n')
           pattern = r'- \(void\) tweetPainting:\(id\)sender\s*\{.*?\n\}'
           replacement = '''- (void) tweetPainting:(id)sender
           {
