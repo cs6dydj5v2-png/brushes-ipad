@@ -1,0 +1,123 @@
+name: Compilar Brushes para iOS 12
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compilar:
+    # GitHub anuncia la retirada de macos-14 el 2 de noviembre de 2026.
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+    steps:
+      - name: Descargar el codigo original (version fija)
+        uses: actions/checkout@v4
+        with:
+          repository: tougher/Brushes
+          ref: a8651ec29e69307e92403731343cbd21040dac73
+          persist-credentials: false
+
+      - name: Adaptar el proyecto antiguo
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import plistlib
+          import re
+
+          project = Path('Brushes.xcodeproj/project.pbxproj')
+          text = project.read_text()
+          # No ejecutar los scripts antiguos de telemetria/localizacion.
+          text, count = re.subn(
+              r'/\* Begin PBXShellScriptBuildPhase section \*/.*?'
+              r'/\* End PBXShellScriptBuildPhase section \*/',
+              '', text, flags=re.S)
+          assert count == 1, 'No se encontro la seccion de scripts esperada'
+          text = ''.join(line for line in text.splitlines(keepends=True)
+                         if '/* ShellScript */,' not in line
+                         and not any(name in line for name in (
+                             'Twitter.framework', 'Crashlytics.framework',
+                             'Fabric.framework')))
+          text = text.replace('libz.dylib', 'libz.tbd')
+          text = text.replace('lastKnownFileType = "compiled.mach-o.dylib";',
+                              'lastKnownFileType = "sourcecode.text-based-dylib-definition";')
+          project.write_text(text)
+
+          source = Path('Classes/WDCanvasController.m')
+          text = source.read_text().replace('#import <Twitter/Twitter.h>\n', '')
+          pattern = r'- \(void\) tweetPainting:\(id\)sender\s*\{.*?\n\}'
+          replacement = '''- (void) tweetPainting:(id)sender
+          {
+              UIActivityViewController *sheet = [[UIActivityViewController alloc]
+                  initWithActivityItems:@[[canvas_.painting imageForCurrentState]]
+                  applicationActivities:nil];
+              sheet.popoverPresentationController.sourceView = self.view;
+              sheet.popoverPresentationController.sourceRect = CGRectMake(
+                  CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+              sheet.popoverPresentationController.permittedArrowDirections = 0;
+              [self presentViewController:sheet animated:YES completion:nil];
+          }'''
+          text, count = re.subn(pattern, lambda _: replacement, text, flags=re.S)
+          assert count == 1, 'No se encontro el metodo de Twitter esperado'
+          source.write_text(text)
+
+          source = Path('Classes/WDBezierSegment.m')
+          source.write_text(source.read_text().replace(
+              '#import <Crashlytics/Crashlytics.h>\n', ''))
+
+          info = Path('Brushes-Info.plist')
+          data = plistlib.loads(info.read_bytes())
+          data.pop('Fabric', None)
+          data['NSPhotoLibraryUsageDescription'] = 'Importar imagenes para dibujar.'
+          data['NSPhotoLibraryAddUsageDescription'] = 'Guardar tus dibujos en Fotos.'
+          info.write_bytes(plistlib.dumps(data))
+          PY
+          plutil -lint Brushes.xcodeproj/project.pbxproj
+          plutil -lint Brushes-Info.plist
+
+      - name: Compilar sin firma de Apple
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          xcodebuild -project Brushes.xcodeproj -target Brushes \
+            -configuration Release -sdk iphoneos \
+            ARCHS=arm64 VALID_ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE="" DEVELOPMENT_TEAM="" \
+            ENABLE_BITCODE=NO ENABLE_USER_SCRIPT_SANDBOXING=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO GCC_NO_COMMON_BLOCKS=NO \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            build 2>&1 | tee build.log
+
+      - name: Empaquetar el IPA
+        shell: bash
+        run: |
+          test -f build/Release-iphoneos/Brushes.app/Brushes
+          mkdir -p build/package/Payload
+          cp -R build/Release-iphoneos/Brushes.app build/package/Payload/
+          cd build/package
+          zip -q -r ../BrushesRedux-ios12.ipa Payload
+
+      - name: Guardar IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BrushesRedux-ios12
+          path: build/BrushesRedux-ios12.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Guardar registro para diagnosticar errores
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: registro-compilacion
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
